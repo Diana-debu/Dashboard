@@ -1,7 +1,6 @@
 import pandas as pd
 from dash import Dash, dcc, html, Input, Output, dash_table
 import plotly.express as px
-import geopandas as gpd
 
 # ----------------------------
 # Cargar datos
@@ -9,15 +8,6 @@ import geopandas as gpd
 df = pd.read_csv("Precios_de_Combustibles_MinEnergia.csv")
 df.columns = df.columns.str.lower()
 df["codigodepartamento"] = df["codigodepartamento"].astype(int)
-
-# ----------------------------
-# Cargar shapefile y preparar
-# ----------------------------
-gdf = gpd.read_file("COLOMBIA/COLOMBIA.shp")
-gdf["DPTO_CCDGO"] = gdf["DPTO_CCDGO"].astype(int)
-
-# Preparamos estructura de lookup para choropleth (croquis completo)
-gdf_base = gdf.copy()
 
 # ----------------------------
 # Precomputar datasets por filtro
@@ -36,7 +26,7 @@ for anio in df["periodo"].unique():
 # Inicializar app
 # ----------------------------
 app = Dash(__name__)
-server = app.server  # 👈 para Render
+server = app.server  # 👈 necesario para Render
 
 anios = sorted(df['periodo'].unique())
 meses = sorted(df['mes'].unique())
@@ -78,14 +68,13 @@ app.layout = html.Div([
         ], style={'width': '40%', 'display': 'inline-block', 'padding': '10px'}),
     ]),
 
-    dcc.Graph(id="mapa-precios"),
-
     html.Div([
+        dcc.Graph(id="scatter-precios", style={'width': '48%', 'display': 'inline-block'}),
         dcc.Graph(id="barras-precios", style={'width': '48%', 'display': 'inline-block'}),
-        dcc.Graph(id="boxplot-precios", style={'width': '48%', 'display': 'inline-block'}),
     ]),
 
     html.Div([
+        dcc.Graph(id="boxplot-precios", style={'width': '48%', 'display': 'inline-block'}),
         html.Div([
             html.H3("Datos filtrados"),
             dash_table.DataTable(
@@ -98,9 +87,6 @@ app.layout = html.Div([
                 sort_action="native"
             )
         ], style={'width': '48%', 'display': 'inline-block', 'verticalAlign': 'top'}),
-
-        html.Div([dcc.Graph(id="mapa-coropletico")],
-                 style={'width': '48%', 'display': 'inline-block'}),
     ])
 ])
 
@@ -108,11 +94,10 @@ app.layout = html.Div([
 # Callbacks optimizados
 # ----------------------------
 @app.callback(
-    [Output("mapa-precios", "figure"),
+    [Output("scatter-precios", "figure"),
      Output("barras-precios", "figure"),
      Output("boxplot-precios", "figure"),
-     Output("tabla-datos", "data"),
-     Output("mapa-coropletico", "figure")],
+     Output("tabla-datos", "data")],
     [Input("filtro-anio", "value"),
      Input("filtro-mes", "value"),
      Input("filtro-producto", "value")]
@@ -122,46 +107,27 @@ def actualizar_dashboard(anio, mes, producto):
 
     # Scatter simplificado (promedio por municipio)
     df_mun = dff.groupby("municipio")["precio"].mean().reset_index()
-    fig_mapa = px.scatter(
+    fig_scatter = px.scatter(
         df_mun, x="municipio", y="precio",
         size="precio", color="precio",
         title=f"Precios promedio de {producto} en {mes} {anio}"
     )
 
-    # Barras
+    # Barras (promedio por departamento)
     fig_barras = px.bar(
         dff.groupby("nombredepartamento")["precio"].mean().reset_index(),
         x="nombredepartamento", y="precio",
         title="Precio promedio por departamento"
     )
 
-    # Boxplot
+    # Boxplot (distribución de precios)
     fig_box = px.box(
         dff, x="nombredepartamento", y="precio",
         title="Distribución de precios"
     )
 
-    # Choropleth
-    dpto_mean = dff.groupby("codigodepartamento")["precio"].mean().reset_index()
-    gdf_merged = gdf_base.merge(dpto_mean, left_on="DPTO_CCDGO",
-                                right_on="codigodepartamento", how="left")
-
-    fig_choro = px.choropleth(
-        gdf_merged,
-        geojson=gdf_merged.__geo_interface__,
-        locations=gdf_merged.index,
-        color="precio",
-        projection="mercator",
-        title=f"Mapa coroplético ({producto}, {mes} {anio})",
-        labels={"precio": "Precio ($)"},
-        color_continuous_scale="OrRd"
-    )
-    fig_choro.update_geos(fitbounds="locations", visible=False)
-    fig_choro.update_traces(marker_line=dict(width=0.3, color="black"))
-
-    return fig_mapa, fig_barras, fig_box, dff.to_dict("records"), fig_choro
+    return fig_scatter, fig_barras, fig_box, dff.to_dict("records")
 
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8050, debug=True)
-# ----------------------------
