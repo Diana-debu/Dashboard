@@ -2,33 +2,48 @@ import pandas as pd
 from dash import Dash, dcc, html, Input, Output, dash_table
 import plotly.express as px
 import geopandas as gpd
-import os
 
 # ----------------------------
 # Cargar datos
 # ----------------------------
 df = pd.read_csv("Precios_de_Combustibles_MinEnergia.csv")
 df.columns = df.columns.str.lower()
-
-# ----------------------------
-# Cargar shapefile de Colombia
-# ----------------------------
-gdf = gpd.read_file("COLOMBIA/COLOMBIA.shp")
-gdf["DPTO_CCDGO"] = gdf["DPTO_CCDGO"].astype(int)
 df["codigodepartamento"] = df["codigodepartamento"].astype(int)
 
 # ----------------------------
-# Inicializar la app
+# Cargar shapefile y preparar
+# ----------------------------
+gdf = gpd.read_file("COLOMBIA/COLOMBIA.shp")
+gdf["DPTO_CCDGO"] = gdf["DPTO_CCDGO"].astype(int)
+
+# Preparamos estructura de lookup para choropleth (croquis completo)
+gdf_base = gdf.copy()
+
+# ----------------------------
+# Precomputar datasets por filtro
+# ----------------------------
+data_cache = {}
+for anio in df["periodo"].unique():
+    for mes in df["mes"].unique():
+        for producto in df["producto"].unique():
+            key = (anio, mes, producto)
+            dff = df[(df["periodo"] == anio) &
+                     (df["mes"] == mes) &
+                     (df["producto"] == producto)]
+            data_cache[key] = dff
+
+# ----------------------------
+# Inicializar app
 # ----------------------------
 app = Dash(__name__)
+server = app.server  # 👈 para Render
 
-# Opciones dinámicas
 anios = sorted(df['periodo'].unique())
 meses = sorted(df['mes'].unique())
 productos = sorted(df['producto'].unique())
 
 # ----------------------------
-# Layout del dashboard
+# Layout
 # ----------------------------
 app.layout = html.Div([
     html.H1("Dashboard de Precios de Combustibles en Colombia", 
@@ -63,22 +78,19 @@ app.layout = html.Div([
         ], style={'width': '40%', 'display': 'inline-block', 'padding': '10px'}),
     ]),
 
-    # Mapa scatter simple
     dcc.Graph(id="mapa-precios"),
 
-    # Gráficos comparativos
     html.Div([
         dcc.Graph(id="barras-precios", style={'width': '48%', 'display': 'inline-block'}),
         dcc.Graph(id="boxplot-precios", style={'width': '48%', 'display': 'inline-block'}),
     ]),
 
-    # Tabla y mapa coroplético juntos
     html.Div([
         html.Div([
             html.H3("Datos filtrados"),
             dash_table.DataTable(
                 id="tabla-datos",
-                columns=[{"name": i, "id": i} for i in df.columns],
+                columns=[{"name": i, "id": i} for i in ["periodo","mes","producto","nombredepartamento","municipio","precio"]],
                 page_size=10,
                 style_table={'overflowX': 'auto'},
                 style_cell={'textAlign': 'left'},
@@ -87,14 +99,13 @@ app.layout = html.Div([
             )
         ], style={'width': '48%', 'display': 'inline-block', 'verticalAlign': 'top'}),
 
-        html.Div([
-            dcc.Graph(id="mapa-coropletico")
-        ], style={'width': '48%', 'display': 'inline-block'}),
+        html.Div([dcc.Graph(id="mapa-coropletico")],
+                 style={'width': '48%', 'display': 'inline-block'}),
     ])
 ])
 
 # ----------------------------
-# Callbacks
+# Callbacks optimizados
 # ----------------------------
 @app.callback(
     [Output("mapa-precios", "figure"),
@@ -107,35 +118,33 @@ app.layout = html.Div([
      Input("filtro-producto", "value")]
 )
 def actualizar_dashboard(anio, mes, producto):
-    dff = df[(df["periodo"] == anio) & 
-             (df["mes"] == mes) & 
-             (df["producto"] == producto)]
+    dff = data_cache[(anio, mes, producto)]
 
-    # Mapa scatter simple
+    # Scatter simplificado (promedio por municipio)
+    df_mun = dff.groupby("municipio")["precio"].mean().reset_index()
     fig_mapa = px.scatter(
-        dff, x="municipio", y="precio",
+        df_mun, x="municipio", y="precio",
         size="precio", color="precio",
-        hover_name="nombredepartamento",
-        title=f"Precios de {producto} en {mes} {anio}"
+        title=f"Precios promedio de {producto} en {mes} {anio}"
     )
 
-    # Barras (precio promedio por departamento)
+    # Barras
     fig_barras = px.bar(
         dff.groupby("nombredepartamento")["precio"].mean().reset_index(),
         x="nombredepartamento", y="precio",
-        title="Precio promedio por departamento",
-        labels={"precio": "Precio ($)"}
+        title="Precio promedio por departamento"
     )
 
     # Boxplot
     fig_box = px.box(
         dff, x="nombredepartamento", y="precio",
-        title="Distribución de precios por departamento"
+        title="Distribución de precios"
     )
 
-    # Coroplético (precio promedio por departamento)
+    # Choropleth
     dpto_mean = dff.groupby("codigodepartamento")["precio"].mean().reset_index()
-    gdf_merged = gdf.merge(dpto_mean, left_on="DPTO_CCDGO", right_on="codigodepartamento", how="left")
+    gdf_merged = gdf_base.merge(dpto_mean, left_on="DPTO_CCDGO",
+                                right_on="codigodepartamento", how="left")
 
     fig_choro = px.choropleth(
         gdf_merged,
@@ -143,25 +152,16 @@ def actualizar_dashboard(anio, mes, producto):
         locations=gdf_merged.index,
         color="precio",
         projection="mercator",
-        title=f"Mapa coroplético de precios promedio ({producto}, {mes} {anio})",
+        title=f"Mapa coroplético ({producto}, {mes} {anio})",
         labels={"precio": "Precio ($)"},
         color_continuous_scale="OrRd"
     )
-
-    # Mostrar todo el croquis y NaN en gris
     fig_choro.update_geos(fitbounds="locations", visible=False)
-    fig_choro.update_traces(marker_line=dict(width=0.5, color="black"))
-    fig_choro.update_traces(zmin=df["precio"].min(), zmax=df["precio"].max())
+    fig_choro.update_traces(marker_line=dict(width=0.3, color="black"))
 
     return fig_mapa, fig_barras, fig_box, dff.to_dict("records"), fig_choro
 
-# ----------------------------
-# Ejecutar servidor
-# ----------------------------
-server = app.server  # 👈 ESTA LÍNEA ES CLAVE
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8050, debug=True)
-
-
-
+# ----------------------------
